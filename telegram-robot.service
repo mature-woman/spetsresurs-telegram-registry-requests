@@ -1,0 +1,10 @@
+[Unit]
+Description=Telegram-robot
+
+[Service]
+ExecStart=sudo -u www-data /usr/bin/php /var/www/spetsresurs-telegram-registry-requests/mirzaev/spetsresurs/telegram/registry/requests/system/public/robot.php
+PIDFile=/var/run/php/telegram-robot.pid
+RemainAfterExit=no
+RuntimeMaxSec=3600s
+Restart=always
+RestartSec=5s

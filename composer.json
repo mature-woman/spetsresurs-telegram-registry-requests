@@ -1,16 +1,16 @@
 {
-    "name": "mirzaev/spetsresurs-viber-registry-requests",
+    "name": "mirzaev/spetsresurs-telegram-registry-requests",
     "type": "robot",
     "require": {
-        "bogdaan/viber-bot-php": "^0.0.15",
         "triagens/arangodb": "^3.8",
         "mirzaev/arangodb": "^1.0",
-        "monolog/monolog": "^3.3"
+        "badfarm/zanzara": "^0.9.1",
+        "nyholm/psr7": "^1.8"
     },
     "license": "WTFPL",
     "autoload": {
         "psr-4": {
-            "mirzaev\\spetsresurs\\viber\\registry\\requests\\": "mirzaev/spetsresurs/viber/registry/requests/system/"
+            "mirzaev\\spetsresurs\\telegram\\registry\\requests\\": "mirzaev/spetsresurs/telegram/registry/requests/system/"
         }
     },
     "authors": [
@@ -19,5 +19,10 @@
             "email": "arsen@mirzaev.sexy"
         }
     ],
-    "minimum-stability": "stable"
+    "minimum-stability": "stable",
+    "config": {
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
+    }
 }
