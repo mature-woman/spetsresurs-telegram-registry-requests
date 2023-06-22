@@ -170,7 +170,7 @@ function requests(int $amount = 5, int $page = 1): Cursor
 		$arangodb->session,
 		[
 			'query' => sprintf(
-				"FOR d IN works FILTER d.confirmed != 'да' SORT d.created DESC LIMIT %d, %d RETURN d",
+				"FOR d IN works FILTER d.worker == null && d.confirmed != 'да' SORT d.created DESC LIMIT %d, %d RETURN d",
 				$offset,
 				$amount + $offset
 			),
