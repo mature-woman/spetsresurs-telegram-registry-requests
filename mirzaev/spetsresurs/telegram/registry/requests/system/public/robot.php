@@ -30,34 +30,59 @@ function authorization(string $id): _document|null|false
 {
 	global $arangodb;
 
-	if (collection::init($arangodb->session, 'telegram'))
-		if (
-			($telegram = collection::search($arangodb->session, sprintf("FOR d IN telegram FILTER d.id == '%s' RETURN d", $id)))
-			|| $telegram = collection::search(
-				$arangodb->session,
-				sprintf(
-					"FOR d IN telegram FILTER d._id == '%s' RETURN d",
-					document::write($arangodb->session,	'telegram', ['id' => $id, 'status' => 'inactive'])
-				)
-			)
-		)
+	if (collection::init($arangodb->session, 'telegram')) {
+		if ($telegram = collection::search($arangodb->session, sprintf("FOR d IN telegram FILTER d.id == '%s' RETURN d", $id))) {
 			if ($telegram->number === null) return null;
 			else if (
-				$telegram->status === 'active'
-				&& collection::init($arangodb->session, 'workers')
-				&& $worker = collection::search(
+				$telegram->active
+				&& collection::init($arangodb->session, 'account')
+				&& $account = collection::search(
 					$arangodb->session,
 					sprintf(
-						"FOR d IN workers LET e = (FOR e IN connections FILTER e._to == '%s' RETURN e._from)[0] FILTER d._id == e RETURN d",
+						"FOR d IN account FILTER d.number == '%s' RETURN d",
+						$telegram->number,
 						$telegram->getId()
 					)
 				)
-			) return $worker;
+			) return $account;
 			else return false;
-		else  throw new exception('Не удалось найти или создать аккаунт');
-	else throw new exception('Не удалось инициализировать коллекцию');
+		}
+	} else throw new exception('Не удалось инициализировать коллекцию');
 
 	return false;
+}
+
+/**
+ * Сотрудник
+ *
+ * @param string $id Идентификатор аккаунта
+ *
+ * @return _document|null|false (инстанция аккаунта, если подключен и авторизован; null, если не подключен; false, если подключен но неавторизован)
+ */
+function worker(string $id): _document|null|false
+{
+	global $arangodb;
+
+	return collection::search(
+		$arangodb->session,
+		sprintf(
+			<<<'AQL'
+				FOR d IN worker
+					LET e = (
+						FOR e IN account_edge_worker
+							FILTER e._from == '%s'
+							SORT e.created DESC, e._key DESC
+							LIMIT 1
+							RETURN e
+					)
+					FILTER d._id == e[0]._to && d.active == true
+					SORT d.created DESC, d._key DESC
+					LIMIT 1
+					RETURN d
+			AQL,
+			$id
+		)
+	);
 }
 
 function registration(string $id, string $number): bool
@@ -71,49 +96,52 @@ function registration(string $id, string $number): bool
 			// Запись номера
 			$telegram->number = $number;
 			if (!document::update($arangodb->session, $telegram)) return false;
-		} else if (!collection::search(
-			$arangodb->session,
-			sprintf(
-				"FOR d IN telegram FILTER d._id == '%s' RETURN d",
-				document::write($arangodb->session,	'telegram', ['id' => $id, 'status' => 'inactive', 'number' => $number])
-			)
-		)) return false;
-
-		// Инициализация ребра: workers -> telegram
-		if (
-			collection::init($arangodb->session, 'workers')
-			&& ($worker = collection::search(
+		} else if (
+			$number === null
+			|| !$telegram = collection::search(
 				$arangodb->session,
 				sprintf(
-					"FOR d IN workers FILTER d.phone == '%d' RETURN d",
+					"FOR d IN telegram FILTER d._id == '%s' RETURN d",
+					document::write($arangodb->session,	'telegram', ['id' => $id, 'active' => false, 'number' => $number])
+				)
+			)
+		) return false;
+
+		// Инициализация ребра: account -> telegram
+		if (
+			collection::init($arangodb->session, 'account')
+			&& ($account = collection::search(
+				$arangodb->session,
+				sprintf(
+					"FOR d IN account FILTER d.number == '%d' RETURN d",
 					$telegram->number
 				)
 			))
-			&& collection::init($arangodb->session, 'connections', true)
+			&& collection::init($arangodb->session, 'connection', true)
 			&& (collection::search(
 				$arangodb->session,
 				sprintf(
-					"FOR d IN connections FILTER d._from == '%s' && d._to == '%s' RETURN d",
-					$worker->getId(),
+					"FOR d IN connection FILTER d._from == '%s' && d._to == '%s' RETURN d",
+					$account->getId(),
 					$telegram->getId()
 				)
 			)
 				?? collection::search(
 					$arangodb->session,
 					sprintf(
-						"FOR d IN connections FILTER d._id == '%s' RETURN d",
+						"FOR d IN connection FILTER d._id == '%s' RETURN d",
 						document::write(
 							$arangodb->session,
-							'connections',
-							['_from' => $worker->getId(), '_to' => $telegram->getId()]
+							'connection',
+							['_from' => $account->getId(), '_to' => $telegram->getId()]
 						)
 					)
 				))
 		) {
-			// Инициализировано ребро: workers -> telegram
+			// Инициализировано ребро: account -> telegram
 
 			// Активация
-			$telegram->status = 'active';
+			$telegram->active = true;
 			return document::update($arangodb->session, $telegram);
 		}
 	} else throw new exception('Не удалось инициализировать коллекцию');
@@ -137,10 +165,10 @@ function generateAuthenticationKeyboard(): array
 
 function generateMenu(Context $ctx): void
 {
-	if ($worker = authorization($ctx->getMessage()?->getFrom()?->getId() ?? $ctx->getCallbackQuery()->getFrom()->getId())) {
+	if ($account = authorization($ctx->getMessage()?->getFrom()?->getId() ?? $ctx->getCallbackQuery()->getFrom()->getId())) {
 		// Успешная авторизация
 
-		$ctx->sendMessage('👋 Здравствуйте, ' . $worker->name, [
+		$ctx->sendMessage('👋 Здравствуйте, ' . preg_replace('/([._\-()!#])/', '\\\$1', $account->name['first']), [
 			'reply_markup' => [
 				'inline_keyboard' => [
 					[
@@ -170,12 +198,14 @@ function requests(int $amount = 5, int $page = 1): Cursor
 		$arangodb->session,
 		[
 			'query' => sprintf(
-				"FOR d IN works FILTER d.worker == null && d.confirmed != 'да' SORT d.created DESC LIMIT %d, %d RETURN d",
+				"FOR d IN task FILTER d.date >= %s && d.date <= %s && d.worker == null && d.confirmed != true && d.published == true && d.completed != true SORT d.created DESC, d._key DESC LIMIT %d, %d RETURN d",
+				(new DateTime('now'))->setTime(7, 0)->format('U'),
+				(new DateTime('tomorrow'))->setTime(7, 0)->format('U'),
 				$offset,
 				$amount + $offset
 			),
 			"batchSize" => 1000,
-			"sanitize"  => true
+			"sanitize"	=> true
 		]
 	))->execute();
 }
@@ -207,42 +237,37 @@ function request_choose(Context $ctx): void
 {
 	global $arangodb;
 
-	if (($worker = authorization($ctx->getCallbackQuery()->getFrom()->getId())) instanceof _document) {
+	if (($account = authorization($ctx->getCallbackQuery()->getFrom()->getId())) instanceof _document) {
 		// Авторизован
 
-		// Инициализация ключа инстанции works в базе данных
+		// Инициализация ключа инстанции task в базе данных
 		preg_match('/^#(\d+)\n/', $ctx->getCallbackQuery()->getMessage()->getText(), $matches);
 		$_key = $matches[1];
 
-		// Инициализация инстанции works в базе данных (выбранного задания)
-		$work = collection::search($arangodb->session, sprintf("FOR d IN works FILTER d._key == '%s' RETURN d", $_key));
+		// Инициализация инстанции task в базе данных (выбранного задания)
+		$task = collection::search($arangodb->session, sprintf("FOR d IN task FILTER d._key == '%s' && d.published == true && d.completed != true RETURN d", $_key));
 
-		// Запись о том, что задание подтверждено (в будущем здесь будет отправка на потдверждение модераторам)
-		$work->confirmed = 'да';
+		if ($worker = worker($account->getId())) {
+			// Найден сотрудник
 
-		// Запись о том, что необходимо перенести изменения в Google Sheets
-		$work->transfer_to_sheets = 'да';
+			// Запись идентификатора нового сотрудника
+			$task->worker = $worker->getKey();
 
-		// Запись идентификатора Google Sheets нового сотрудника
-		$work->worker = $worker->id;
+			// Снятие с публикации
+			$task->published = false;
 
-		if (document::update($arangodb->session, $work)) {
-			// Записано обновление в базу данных
-
-			if (collection::search(
-				$arangodb->session,
-				sprintf(
-					"FOR d IN readinesses FILTER d._id == '%s' RETURN d",
-					document::write($arangodb->session, 'readinesses', ['_from' => $worker->getId(), '_to' => $work->getId()])
-				)
-			)) {
-				// Записано ребро: worker -> work (принятие заявки)
+			if (document::update($arangodb->session, $task)) {
+				// Записано обновление в базу данных
 
 				$ctx->sendMessage("✅ *Заявка принята:* \#$_key", ['reply_markup' =>	['remove_keyboard' => true]])->then(function () use ($ctx) {
 					generateMenu($ctx);
 				});
-			}
-		}
+			} else $ctx->sendMessage("❎ *Не удалось принять заявку:* \#$_key", ['reply_markup' =>	['remove_keyboard' => true]])->then(function () use ($ctx) {
+				generateMenu($ctx);
+			});
+		} else $ctx->sendMessage("❎ *Не удалось принять заявку:* \#$_key", ['reply_markup' =>	['remove_keyboard' => true]])->then(function () use ($ctx) {
+			generateMenu($ctx);
+		});
 	}
 }
 
@@ -263,29 +288,29 @@ function search(Context $ctx): void
 			}
 
 			// Поиск заявок из базы данных
-			$requests = requests(6, $page);
+			$tasks = requests(6, $page);
 
 			// Подсчёт количества прочитанных заявок из базы данных
-			$count = $requests->getCount();
+			$count = $tasks->getCount();
 
 			// Проверка существования избытка
 			$excess = $count % 6 === 0;
 
 			// Обрезка заявок до размера страницы
-			$requests = array_slice($requests->getAll(), 0, 5);
+			$tasks = array_slice($tasks->getAll(), 0, 5);
 
 			if ($count === 0) $ctx->sendMessage('📦 *Заявок нет*');
 			else {
 				// Найдены заявки
 
-				foreach ($requests as $i => $request) {
+				foreach ($tasks as $i => $task) {
 					// Перебор найденных заявок
-	
+
 					if (($market = collection::search(
 						$arangodb->session,
 						sprintf(
-							"FOR d IN markets LET e = (FOR e IN requests FILTER e._to == '%s' RETURN e._from)[0] FILTER d._id == e RETURN d",
-							$request->getId()
+							"FOR d IN market FILTER d._key == '%s' RETURN d",
+							$task->market
 						)
 					)) instanceof _document) {
 						// Найден магазин	
@@ -303,7 +328,7 @@ function search(Context $ctx): void
 							preg_replace(
 								'/([._\-()!#])/',
 								'\\\$1',
-								"*#{$request->getKey()}*\n" . $request->date['converted'] . " (" . $request->start['converted'] . " - " . $request->end['converted'] . ")\n\n*Город:* $market->city\n*Адрес:* $market->address\n*Работа:* \"$request->work\""
+								"*#{$task->getKey()}*\n" . (new DateTime('@' . $task->date))->format('d.m.Y') . " (" . $task->start . " - " . $task->end . ")\n\n*Город:* $market->city\n*Адрес:* $market->address\n*Работа:* $task->work" . (mb_strlen($task->description) > 0 ? "\n\n$task->description" : '')
 							),
 							[
 								'reply_markup' => [
@@ -314,10 +339,11 @@ function search(Context $ctx): void
 									]
 								]
 							]
-						)->then(function ($message) use ($ctx, $requests, $i, $page, $excess) {
+						)->then(function ($message) use ($ctx, $tasks, $i, $page, $excess) {
 							// Запись сообщения в кеш (на случай необходимости его удаления при смене страницы)
-							$ctx->setChatDataItem("request_$i", $message)->then(function () use ($ctx, $requests, $i, $page, $excess) {
-								if ($i === array_key_last($requests)) {
+							$ctx->setChatDataItem("request_$i", $message)->then(function () use ($ctx, $tasks, $i, $page, $excess) {
+
+								if ($i === array_key_last($tasks)) {
 									// Удаление предыдущего меню 
 									$ctx->getChatDataItem("request_menu")->then(function ($message) use ($ctx) {
 										$ctx->deleteMessage($message->getChat()->getId(), $message->getMessageId());
