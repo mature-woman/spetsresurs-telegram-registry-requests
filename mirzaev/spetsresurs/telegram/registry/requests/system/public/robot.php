@@ -198,9 +198,10 @@ function requests(int $amount = 5, int $page = 1): Cursor
 		$arangodb->session,
 		[
 			'query' => sprintf(
-				"FOR d IN task FILTER d.date >= %s && d.date <= %s && d.worker == null && d.confirmed != true && d.published == true && d.completed != true SORT d.created DESC, d._key DESC LIMIT %d, %d RETURN d",
+				"FOR d IN task FILTER d.date >= %s && d.worker == null && d.confirmed != true && d.published == true && d.completed != true SORT d.created DESC, d._key DESC LIMIT %d, %d RETURN d",
+				/* "FOR d IN task FILTER d.date >= %s && d.date <= %s && d.worker == null && d.confirmed != true && d.published == true && d.completed != true SORT d.created DESC, d._key DESC LIMIT %d, %d RETURN d", */
 				(new DateTime('now'))->setTime(7, 0)->format('U'),
-				(new DateTime('tomorrow'))->setTime(7, 0)->format('U'),
+				/* (new DateTime('tomorrow'))->setTime(7, 0)->format('U'), */
 				$offset,
 				$amount + $offset
 			),
