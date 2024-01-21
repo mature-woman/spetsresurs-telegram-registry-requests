@@ -1,6 +1,3 @@
-# Viber chat-robot
+# Telegram-robot for registering for tasks
 
-Sending requests from [mirzaev/spetsresurs-google_sheets-parser](https://git.mirzaev.sexy/mirzaev/spetsresurs-google_sheets-parser) to [mirzaev/arangodb](https://git.mirzaev.sexy/mirzaev/arangodb) and vice versa
-
-~~😼 Developed in 1 day for 100000 rubles ($1200)~~ shit happens
-
+Synchronizes accounts with the site, displays a list of published applications with a selection by date, and also register to tasks
