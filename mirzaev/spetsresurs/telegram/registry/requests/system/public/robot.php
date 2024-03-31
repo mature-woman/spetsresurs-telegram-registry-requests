@@ -23,6 +23,41 @@ $arangodb = new connection(require __DIR__ . '/../settings/arangodb.php');
 ini_set('display_errors', 1);
 ini_set('display_startup_errors', 1); */
 
+function escape(string $text)
+{
+	return str_replace(
+		[
+			'#',
+			'*',
+			'_',
+			'=',
+			'.',
+			'[',
+			']',
+			'(',
+			')',
+			'-',
+			'>',
+			'<'
+		],
+		[
+			'\#',
+			'\*',
+			'\_',
+			'\\=',
+			'\.',
+			'\[',
+			'\]',
+			'\(',
+			'\)',
+			'\-',
+			'\>',
+			'\<'
+		],
+		$text
+	);
+}
+
 /**
  * Авторизация
  *
@@ -79,7 +114,7 @@ function worker(string $id): _document|null|false
 							LIMIT 1
 							RETURN e
 					)
-					FILTER d._id == e[0]._to && d.active == true
+					FILTER d._id == e[0]._to
 					SORT d.created DESC, d._key DESC
 					LIMIT 1
 					RETURN d
@@ -172,18 +207,26 @@ function generateMenu(Context $ctx): void
 	if ($account = authorization($ctx->getMessage()?->getFrom()?->getId() ?? $ctx->getCallbackQuery()->getFrom()->getId())) {
 		// Успешная авторизация
 
-		$ctx->sendMessage('👋 Здравствуйте, ' . preg_replace('/([._\-()!#])/', '\\\$1', $account->name['first']), [
-			'reply_markup' => [
-				'inline_keyboard' => [
-					[
-						['text' => '🔍 Активные заявки', 'callback_data' => 'day']
-					]
-				],
-				'remove_keyboard' => true
-			]
-		])->then(function ($message) use ($ctx) {
-			$ctx->setChatDataItem("menu", $message);
-		});
+		if (!$account->active) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else if ($account->banned) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else if (!($worker = worker($account->getId()))->active) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else if ($worker->fired) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else {
+			// Активен аккаунт
+
+			$ctx->sendMessage('👋 Здравствуйте, ' . preg_replace('/([._\-()!#])/', '\\\$1', $account->name['first']), [
+				'reply_markup' => [
+					'inline_keyboard' => [
+						[
+							['text' => '🔍 Активные заявки', 'callback_data' => 'day']
+						]
+					],
+					'remove_keyboard' => true
+				]
+			])->then(function ($message) use ($ctx) {
+				$ctx->setChatDataItem("menu", $message);
+			});
+		}
 	}
 }
 
@@ -256,81 +299,149 @@ function requests_previous(Context $ctx): void
 
 function request_choose(Context $ctx): void
 {
+	if (($account = authorization($ctx->getCallbackQuery()->getFrom()->getId())) instanceof _document) {
+		// Авторизован
+
+		if (!$account->active) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else if ($account->banned) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else if (!($worker = worker($account->getId()))->active) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else if ($worker->fired) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else {
+			// Активен аккаунт
+
+			// Инициализация ключа инстанции task в базе данных
+			preg_match('/\->\s#(\d+)\n/', $ctx->getCallbackQuery()->getMessage()->getText(), $matches);
+
+			// Запись ключа инстанции task (заявка на которую регистрируется сотрудник)
+			$ctx->setChatDataItem("request_confirmation_target", $matches[1]);
+
+			// Запрос подтверждения
+			$ctx->sendMessage("⚡ *Подтверждение записи*\n\n" . preg_replace('/(^[^:\s\n\r]+:)/m', '*$1*', preg_replace('/(\\\#\d+)/', '*$1*', escape($ctx->getCallbackQuery()->getMessage()->getText()))) . "\n\n*⚠️ Вы подтверждаете отправку запроса?*", [
+				'reply_markup' => [
+					'inline_keyboard' => [
+						[
+							['text' => 'Подтвердить', 'callback_data' => 'request_confirmed'],
+							['text' => 'Отменить', 'callback_data' => 'request_rejected']
+						]
+					]
+				]
+			])->then(function ($message) use ($ctx) {
+				// Запись сообщения в кеш (на случай необходимости его удаления)
+				$ctx->setChatDataItem("request_confirmation", $message);
+			});
+		}
+	}
+}
+
+function request_confirmed(Context $ctx): void
+{
 	global $arangodb;
 
 	if (($account = authorization($ctx->getCallbackQuery()->getFrom()->getId())) instanceof _document) {
 		// Авторизован
 
-		// Инициализация ключа инстанции task в базе данных
-		preg_match('/\->\s#(\d+)\n/', $ctx->getCallbackQuery()->getMessage()->getText(), $matches);
-		$_key = $matches[1];
+		$ctx->getChatDataItem("request_confirmation_target")->then(function ($_key) use ($ctx, $arangodb, $account) {
+			// Прочитана запрашиваемая заявка
 
-		// Инициализация инстанции task в базе данных (выбранного задания)
-		$task = collection::search($arangodb->session, sprintf("FOR d IN task FILTER d._key == '%s' && d.published == true && d.completed != true RETURN d", $_key));
+			// Инициализация инстанции task в базе данных (выбранного задания)
+			$task = collection::search($arangodb->session, sprintf("FOR d IN task FILTER d._key == '%s' && d.published == true && d.completed != true RETURN d", $_key));
 
-		if ($worker = worker($account->getId())) {
-			// Найден сотрудник
+			if ($worker ??= worker($account->getId())) {
+				// Найден сотрудник
 
-			// Запись идентификатора нового сотрудника
-			$task->worker = $worker->id;
+				// Запись идентификатора нового сотрудника
+				$task->worker = $worker->id;
 
-			// Снятие с публикации
-			$task->published = false;
+				// Снятие с публикации
+				$task->published = false;
 
-			if (document::update($arangodb->session, $task)) {
-				// Записано обновление в базу данных
+				if (document::update($arangodb->session, $task)) {
+					// Записано обновление в базу данных
 
-				$ctx->getChatDataItem("request_all")->then(function ($requests = []) use ($ctx, $_key) {
-					// Удаление сообщений связанных с запросом
-					foreach ($requests ?? [] as $_message) $ctx->deleteMessage($_message->getChat()->getId(), $_message->getMessageId());
+					$ctx->getChatDataItem("request_all")->then(function ($requests = []) use ($ctx) {
+						// Удаление сообщений связанных с запросом
+						foreach ($requests ?? [] as $_message) $ctx->deleteMessage($_message->getChat()->getId(), $_message->getMessageId());
+					});
 					$ctx->setChatDataItem("request_all", []);
 
-					$ctx->sendMessage("✅ *Заявка принята:* \#$_key", ['reply_markup' =>	['remove_keyboard' => true]])->then(function () use ($ctx) {
+					$ctx->getChatDataItem("request_confirmation")->then(function ($message) use ($ctx) {
+						$ctx->deleteMessage($message->getChat()->getId(), $message->getMessageId());
+					});
+					$ctx->setChatDataItem("request_confirmation_target", null);
+
+					$ctx->sendMessage("✅ *Вы зарегистрировались на заявку:* \#$_key", ['reply_markup' =>	['remove_keyboard' => true]])->then(function () use ($ctx) {
 						generateMenu($ctx);
 					});
 
 					// End of the process
 					$ctx->endConversation();
+				} else $ctx->sendMessage("❎ *Не удалось принять заявку:* \#$_key", ['reply_markup' =>	['remove_keyboard' => true]])->then(function () use ($ctx) {
+					generateMenu($ctx);
 				});
 			} else $ctx->sendMessage("❎ *Не удалось принять заявку:* \#$_key", ['reply_markup' =>	['remove_keyboard' => true]])->then(function () use ($ctx) {
 				generateMenu($ctx);
 			});
-		} else $ctx->sendMessage("❎ *Не удалось принять заявку:* \#$_key", ['reply_markup' =>	['remove_keyboard' => true]])->then(function () use ($ctx) {
-			generateMenu($ctx);
 		});
 	}
 }
 
-function day(Context $ctx): void
+function request_rejected(Context $ctx): void
 {
-	if (authorization($ctx->getMessage()?->getFrom()?->getId() ?? $ctx->getCallbackQuery()->getFrom()->getId()) instanceof _document) {
-		// Авторизован
+	$ctx->getChatDataItem("request_confirmation_target")->then(function ($_key) use ($ctx) {
+		// Прочитана запрашиваемая заявка
 
-		// Инициализация буфера клавиатуры
-		$keyboard = [];
+		$ctx->getChatDataItem("request_confirmation")->then(function ($message) use ($ctx) {
+			$ctx->deleteMessage($message->getChat()->getId(), $message->getMessageId());
+		});
+		$ctx->setChatDataItem("request_confirmation_target", null);
 
-		// Генерация кнопок с выбором даты
-		for ($i = 1, $r = 0; $i < 15; ++$i) $keyboard[$i > 4 * ($r + 1) ? ++$r : $r][] = ['text' => ($date = (new DateTime)->modify("+$i day"))->format('d.m.Y'), 'callback_data' => $date->format('U')];
-
-		$ctx->setChatDataItem('requests_page', 1)->then(function () use ($ctx, $keyboard) {
-			// Отправка меню
-			$ctx->sendMessage('📅 Выберите дату', [
-				'reply_markup' => [
-					'inline_keyboard' => $keyboard
-				]
-			])->then(function ($message) use ($ctx) {
-				$ctx->getChatDataItem("menu")->then(function ($message) use ($ctx) {
-					// Удаление главного меню
-					if ($message) $ctx->deleteMessage($message->getChat()->getId(), $message->getMessageId());
-					$ctx->setChatDataItem("menu", null);
-				});
-
-				// Запись сообщения в кеш (на случай необходимости его удаления при смене страницы)
-				$ctx->setChatDataItem("request_day", $message);
-			});
+		$ctx->sendMessage("✅ *Вы отменили регистрацию на заявку:* \#$_key", ['reply_markup' =>	['remove_keyboard' => true]])->then(function () use ($ctx) {
+			generateMenu($ctx);
 		});
 
-		$ctx->nextStep("search");
+		// End of the process
+		$ctx->endConversation();
+	});
+}
+
+function day(Context $ctx): void
+{
+	if (($account = authorization($ctx->getMessage()?->getFrom()?->getId() ?? $ctx->getCallbackQuery()->getFrom()->getId())) instanceof _document) {
+		// Авторизован
+
+		if (!$account->active) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else if ($account->banned) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else if (!($worker = worker($account->getId()))->active) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else if ($worker->fired) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else {
+			// Активен аккаунт
+
+			// Инициализация буфера клавиатуры
+			$keyboard = [];
+
+			// Генерация кнопок с выбором даты
+			for ($i = 1, $r = 0; $i < 15; ++$i) $keyboard[$i > 4 * ($r + 1) ? ++$r : $r][] = ['text' => ($date = (new DateTime)->modify("+$i day"))->format('d.m.Y'), 'callback_data' => $date->format('U')];
+
+			$ctx->setChatDataItem('requests_page', 1)->then(function () use ($ctx, $keyboard) {
+				// Отправка меню
+				$ctx->sendMessage('📅 Выберите дату', [
+					'reply_markup' => [
+						'inline_keyboard' => $keyboard
+					]
+				])->then(function ($message) use ($ctx) {
+					$ctx->getChatDataItem("menu")->then(function ($message) use ($ctx) {
+						// Удаление главного меню
+						if ($message) $ctx->deleteMessage($message->getChat()->getId(), $message->getMessageId());
+						$ctx->setChatDataItem("menu", null);
+					});
+
+					// Запись сообщения в кеш (на случай необходимости его удаления при смене страницы)
+					$ctx->setChatDataItem("request_day", $message);
+				});
+			});
+
+			$ctx->nextStep("search");
+		}
 	}
 }
 
@@ -338,145 +449,153 @@ function search(Context $ctx): void
 {
 	global $arangodb;
 
-	if (authorization($ctx->getMessage()?->getFrom()?->getId() ?? $ctx->getCallbackQuery()->getFrom()->getId()) instanceof _document) {
+	if (($account = authorization($ctx->getMessage()?->getFrom()?->getId() ?? $ctx->getCallbackQuery()->getFrom()->getId())) instanceof _document) {
 		// Авторизован
 
-		$ctx->getChatDataItem('requests_page')->then(function ($page) use ($ctx, $arangodb) {
-			// Найдена текущая страница
+		if (!$account->active) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else if ($account->banned) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else if (!($worker = worker($account->getId()))->active) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else if ($worker->fired) $ctx->sendMessage('⚠️ Свяжитесь с оператором');
+		else {
+			// Активен аккаунт
 
-			// Значение страницы по умолчанию
-			if (empty($page)) {
-				$page = 1;
-				$ctx->setChatDataItem('requests_page', 1);
-			}
+			$ctx->getChatDataItem('requests_page')->then(function ($page) use ($ctx, $arangodb) {
+				// Найдена текущая страница
 
-			$generate = function ($date) use ($ctx, $page, $arangodb) {
-				// Поиск заявок в ArangoDB
-				$tasks = requests(4, (string) $date, $page);
+				// Значение страницы по умолчанию
+				if (empty($page)) {
+					$page = 1;
+					$ctx->setChatDataItem('requests_page', 1);
+				}
 
-				// Подсчёт количества прочитанных заявок из базы данных
-				$count = $tasks->getCount();
+				$generate = function ($date) use ($ctx, $page, $arangodb) {
+					// Поиск заявок в ArangoDB
+					$tasks = requests(4, (string) $date, $page);
 
-				// Проверка существования избытка
-				$excess = $count > 3;
+					// Подсчёт количества прочитанных заявок из базы данных
+					$count = $tasks->getCount();
 
-				// Обрезка заявок до размера страницы (3 заявки на 1 странице)
-				$tasks = array_slice($tasks->getAll(), 0, 3);
+					// Проверка существования избытка
+					$excess = $count > 3;
 
-				if ($count === 0) {
-					$ctx->sendMessage('📦 *Заявок нет*')->then(function ($message) use ($ctx) {
-						$ctx->getChatDataItem("request_all")->then(function ($requests = []) use ($ctx, $message) {
-							// Удаление сообщений связанных с запросом
-							foreach ($requests ?? [] as $_message) $ctx->deleteMessage($_message->getChat()->getId(), $_message->getMessageId());
-							$ctx->setChatDataItem("request_all", $requests = [$message]);
-						});
-					});
-				} else {
-					// Найдены заявки
+					// Обрезка заявок до размера страницы (3 заявки на 1 странице)
+					$tasks = array_slice($tasks->getAll(), 0, 3);
 
-					$ctx->getChatDataItem("request_day")->then(function ($message) use ($ctx, $arangodb, $tasks, $page, $excess) {
-						// Удаление предыдущего меню с выбором даты
-						if ($message) $ctx->deleteMessage($message->getChat()->getId(), $message->getMessageId());
-						$ctx->setChatDataItem("request_day", null)->then(function () use ($ctx, $arangodb, $tasks, $page, $excess) {
-							$ctx->getChatDataItem("request_all")->then(function ($requests = []) use ($ctx, $arangodb, $tasks, $excess, $page) {
+					if ($count === 0) {
+						$ctx->sendMessage('📦 *Заявок нет*')->then(function ($message) use ($ctx) {
+							$ctx->getChatDataItem("request_all")->then(function ($requests = []) use ($ctx, $message) {
 								// Удаление сообщений связанных с запросом
 								foreach ($requests ?? [] as $_message) $ctx->deleteMessage($_message->getChat()->getId(), $_message->getMessageId());
-								$ctx->setChatDataItem("request_all", [])->then(function () use ($ctx, $arangodb, $tasks, $excess, $page) {
-									foreach ($tasks as $i => $task) {
-										// Перебор найденных заявок
+								$ctx->setChatDataItem("request_all", $requests = [$message]);
+							});
+						});
+					} else {
+						// Найдены заявки
 
-										if (($market = collection::search(
-											$arangodb->session,
-											sprintf(
-												"FOR d IN market FILTER d.id == '%s' RETURN d",
-												$task->market
-											)
-										)) instanceof _document) {
-											// Найден магазин	
-											$ctx->getChatDataItem("request_$i")->then(function ($message) use ($ctx, $task, $market, $tasks, $i, $page, $excess) {
-												// Удаление предыдущего сообщения на этой позиции
-												if ($message) $ctx->deleteMessage($message->getChat()->getId(), $message->getMessageId());
-												$ctx->setChatDataItem("request_$i", null)->then(function () use ($ctx, $task, $market, $tasks, $i, $page, $excess) {
-													// Генерация эмодзи
-													/* $emoji = generateEmojis(); */
+						$ctx->getChatDataItem("request_day")->then(function ($message) use ($ctx, $arangodb, $tasks, $page, $excess) {
+							// Удаление предыдущего меню с выбором даты
+							if ($message) $ctx->deleteMessage($message->getChat()->getId(), $message->getMessageId());
+							$ctx->setChatDataItem("request_day", null)->then(function () use ($ctx, $arangodb, $tasks, $page, $excess) {
+								$ctx->getChatDataItem("request_all")->then(function ($requests = []) use ($ctx, $arangodb, $tasks, $excess, $page) {
+									// Удаление сообщений связанных с запросом
+									foreach ($requests ?? [] as $_message) $ctx->deleteMessage($_message->getChat()->getId(), $_message->getMessageId());
+									$ctx->setChatDataItem("request_all", [])->then(function () use ($ctx, $arangodb, $tasks, $excess, $page) {
+										foreach ($tasks as $i => $task) {
+											// Перебор найденных заявок
 
-													// Отправка сообщения
-													$ctx->sendMessage(
-														preg_replace(
-															'/([._\-()!#])/',
-															'\\\$1',
-															"*#$task->market* -\> *#{$task->getKey()}*\n" . (new DateTime('@' . $task->date))->format('d.m.Y') . " (" . $task->start . " - " . $task->end . ")\n\n*Город:* $market->city\n*Адрес:* $market->address\n*Работа:* $task->work" . (mb_strlen($task->description) > 0 ? "\n\n$task->description" : '')
-														),
-														[
-															'reply_markup' => [
-																'inline_keyboard' => [
-																	[
-																		['text' => '✅ Отправить запрос', 'callback_data' => 'request_choose']
+											if (($market = collection::search(
+												$arangodb->session,
+												sprintf(
+													"FOR d IN market FILTER d.id == '%s' RETURN d",
+													$task->market
+												)
+											)) instanceof _document) {
+												// Найден магазин	
+												$ctx->getChatDataItem("request_$i")->then(function ($message) use ($ctx, $task, $market, $tasks, $i, $page, $excess) {
+													// Удаление предыдущего сообщения на этой позиции
+													if ($message) $ctx->deleteMessage($message->getChat()->getId(), $message->getMessageId());
+													$ctx->setChatDataItem("request_$i", null)->then(function () use ($ctx, $task, $market, $tasks, $i, $page, $excess) {
+														// Генерация эмодзи
+														/* $emoji = generateEmojis(); */
+
+														// Отправка сообщения
+														$ctx->sendMessage(
+															preg_replace(
+																'/([._\-()!#])/',
+																'\\\$1',
+																"*#$task->market* -\> *#{$task->getKey()}*\n" . (new DateTime('@' . $task->date))->format('d.m.Y') . " (" . $task->start . " - " . $task->end . ")\n\n*Город:* $market->city\n*Адрес:* $market->address\n*Работа:* $task->work" . (mb_strlen($task->description) > 0 ? "\n\n$task->description" : '')
+															),
+															[
+																'reply_markup' => [
+																	'inline_keyboard' => [
+																		[
+																			['text' => '✅ Отправить запрос', 'callback_data' => 'request_choose']
+																		]
 																	]
 																]
 															]
-														]
-													)->then(function ($message) use ($ctx, $tasks, $i, $page, $excess) {
-														// Запись сообщения в кеш (на случай необходимости его удаления при смене страницы)
-														$ctx->setChatDataItem("request_$i", $message)->then(function () use ($ctx, $message, $tasks, $i, $page, $excess) {
-															$ctx->getChatDataItem("request_all")->then(function ($requests = []) use ($ctx, $message, $tasks, $i, $page, $excess) {
-																$ctx->setChatDataItem("request_all", $requests = ($requests ?? []) + [count($requests) => $message])->then(function () use ($ctx, $tasks, $i, $page, $excess) {
-																	if ($i === array_key_last($tasks)) {
-																		// End of the process
-																		$ctx->endConversation();
+														)->then(function ($message) use ($ctx, $tasks, $i, $page, $excess) {
+															// Запись сообщения в кеш (на случай необходимости его удаления при смене страницы)
+															$ctx->setChatDataItem("request_$i", $message)->then(function () use ($ctx, $message, $tasks, $i, $page, $excess) {
+																$ctx->getChatDataItem("request_all")->then(function ($requests = []) use ($ctx, $message, $tasks, $i, $page, $excess) {
+																	$ctx->setChatDataItem("request_all", $requests = ($requests ?? []) + [count($requests) => $message])->then(function () use ($ctx, $tasks, $i, $page, $excess) {
+																		if ($i === array_key_last($tasks)) {
+																			// End of the process
+																			$ctx->endConversation();
 
-																		// Удаление предыдущего меню
-																		$ctx->getChatDataItem("request_menu")->then(function ($message) use ($ctx, $page, $excess) {
-																			if ($message) $ctx->deleteMessage($message->getChat()->getId(), $message->getMessageId());
-																			$ctx->setChatDataItem("request_menu", null)->then(function () use ($ctx, $page, $excess) {
-																				// Инициализация буфера для меню поиска
-																				$keyboard = [];
+																			// Удаление предыдущего меню
+																			$ctx->getChatDataItem("request_menu")->then(function ($message) use ($ctx, $page, $excess) {
+																				if ($message) $ctx->deleteMessage($message->getChat()->getId(), $message->getMessageId());
+																				$ctx->setChatDataItem("request_menu", null)->then(function () use ($ctx, $page, $excess) {
+																					// Инициализация буфера для меню поиска
+																					$keyboard = [];
 
-																				// Генерация кнопки: "Предыдущая страница"
-																				if ($page > 1) $keyboard[] = ['text' => 'Назад', 'callback_data' => 'requests_previous'];
+																					// Генерация кнопки: "Предыдущая страница"
+																					if ($page > 1) $keyboard[] = ['text' => 'Назад', 'callback_data' => 'requests_previous'];
 
-																				// Генерация кнопки: "Отображённая страница"
-																				$keyboard[] = ['text' => $page, 'callback_data' => 'requests_current'];
+																					// Генерация кнопки: "Отображённая страница"
+																					$keyboard[] = ['text' => $page, 'callback_data' => 'requests_current'];
 
-																				// Генерация кнопки: "Следующая страница"
-																				if ($excess) $keyboard[] = ['text' => 'Вперёд', 'callback_data' => 'requests_next'];
+																					// Генерация кнопки: "Следующая страница"
+																					if ($excess) $keyboard[] = ['text' => 'Вперёд', 'callback_data' => 'requests_next'];
 
-																				// Отправка меню
-																				$ctx->sendMessage('🔍 Выберите заявку', [
-																					'reply_markup' => [
-																						'inline_keyboard' => [
-																							$keyboard
+																					// Отправка меню
+																					$ctx->sendMessage('🔍 Выберите заявку', [
+																						'reply_markup' => [
+																							'inline_keyboard' => [
+																								$keyboard
+																							]
 																						]
-																					]
-																				])->then(function ($message) use ($ctx) {
-																					// Запись сообщения в кеш (на случай необходимости его удаления при смене страницы)
-																					$ctx->setChatDataItem("request_menu", $message);
+																					])->then(function ($message) use ($ctx) {
+																						// Запись сообщения в кеш (на случай необходимости его удаления при смене страницы)
+																						$ctx->setChatDataItem("request_menu", $message);
+																					});
 																				});
 																			});
-																		});
-																	}
+																		}
+																	});
 																});
 															});
 														});
 													});
 												});
-											});
+											}
 										}
-									}
+									});
 								});
 							});
 						});
-					});
-				}
-			};
+					}
+				};
 
-			// Инициализация даты и генерация
-			$ctx->getChatDataItem('requests_date')->then(function ($old) use ($ctx, $generate) {
-				$new = $ctx->getCallbackQuery()->getData();
-				if ($new === (string) (int) $new && $new <= PHP_INT_MAX && $new >= ~PHP_INT_MAX) $ctx->setChatDataItem('requests_date', $new)->then(fn () => $generate($new));
-				else $generate($old);
+				// Инициализация даты и генерация
+				$ctx->getChatDataItem('requests_date')->then(function ($old) use ($ctx, $generate) {
+					$new = $ctx->getCallbackQuery()->getData();
+					if ($new === (string) (int) $new && $new <= PHP_INT_MAX && $new >= ~PHP_INT_MAX) $ctx->setChatDataItem('requests_date', $new)->then(fn () => $generate($new));
+					else $generate($old);
+				});
 			});
-		});
+		}
 	}
 }
 
@@ -540,6 +659,8 @@ $bot->onCommand('start', function (Context $ctx) use ($stop): void {
 $bot->onCbQueryData(['requests_next'], fn ($ctx) => requests_next($ctx));
 $bot->onCbQueryData(['requests_previous'], fn ($ctx) => requests_previous($ctx));
 $bot->onCbQueryData(['request_choose'], fn ($ctx) => request_choose($ctx));
+$bot->onCbQueryData(['request_confirmed'], fn ($ctx) => request_confirmed($ctx));
+$bot->onCbQueryData(['request_rejected'], fn ($ctx) => request_rejected($ctx));
 $bot->onCommand('day', fn ($ctx) => day($ctx));
 $bot->onCbQueryData(['day'], fn ($ctx) => day($ctx));
 
