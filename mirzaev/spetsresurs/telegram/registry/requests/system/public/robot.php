@@ -236,10 +236,11 @@ function generateMenu(Context $ctx): void
  * @param int $amount Количество
  * @param ?string $date За какую дату (unixtime)
  * @param int $page Страница
+ * @param _document $worker Сотрудник
  *
  * @return Cursor
  */
-function requests(int $amount = 5, ?string $date = null, int $page = 1): Cursor
+function requests(int $amount = 5, ?string $date = null, int $page = 1, _document $worker): Cursor
 {
 	global $arangodb;
 
@@ -260,11 +261,12 @@ function requests(int $amount = 5, ?string $date = null, int $page = 1): Cursor
 		[
 			'query' => sprintf(
 				// d.date < %s там специально, не менять на <=
-				"FOR d IN task FILTER ((d.date >= %s && d.date < %s && d.start >= '05:00') || (d.date >= %s && d.date < %s && d.start < '05:00')) && d.worker == null && d.market != null && d.confirmed != true && d.published == true && d.completed != true SORT d.created DESC, d._key DESC LIMIT %d, %d RETURN d",
+				"FOR d IN task FILTER ((d.date >= %s && d.date < %s && d.start >= '05:00') || (d.date >= %s && d.date < %s && d.start < '05:00')) && d.worker == null && d.market != null && d.confirmed != true && d.published == true && d.completed != true && (FOR m IN market FILTER m.id == d.market && IS_ARRAY(m.bans) SORT m.created DESC, m._key DESC LIMIT 1 RETURN !POSITION(m.bans, \"%s\"))[0] SORT d.created DESC, d._key DESC LIMIT %d, %d RETURN d",
 				$from = (new DateTime("@$date"))->setTime(0, 0)->format('U'),
 				$to = (new DateTime("@$date"))->modify('+1 day')->setTime(0, 0)->format('U'),
 				$to,
 				(new DateTime("@$date"))->modify('+2 day')->setTime(0, 0)->format('U'),
+				$worker->id,
 				$offset,
 				$amount + $offset - ($page > 0)
 			),
@@ -459,7 +461,7 @@ function search(Context $ctx): void
 		else {
 			// Активен аккаунт
 
-			$ctx->getChatDataItem('requests_page')->then(function ($page) use ($ctx, $arangodb) {
+			$ctx->getChatDataItem('requests_page')->then(function ($page) use ($ctx, $arangodb, $worker) {
 				// Найдена текущая страница
 
 				// Значение страницы по умолчанию
@@ -468,9 +470,9 @@ function search(Context $ctx): void
 					$ctx->setChatDataItem('requests_page', 1);
 				}
 
-				$generate = function ($date) use ($ctx, $page, $arangodb) {
+				$generate = function ($date) use ($ctx, $page, $arangodb, $worker) {
 					// Поиск заявок в ArangoDB
-					$tasks = requests(4, (string) $date, $page);
+					$tasks = requests(4, (string) $date, $page, $worker);
 
 					// Подсчёт количества прочитанных заявок из базы данных
 					$count = $tasks->getCount();
