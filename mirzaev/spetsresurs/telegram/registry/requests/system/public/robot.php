@@ -346,7 +346,7 @@ function request_confirmed(Context $ctx): void
 			// Прочитана запрашиваемая заявка
 
 			// Инициализация инстанции task в базе данных (выбранного задания)
-			$task = collection::search($arangodb->session, sprintf("FOR d IN task FILTER d._key == '%s' && d.published == true && d.completed != true RETURN d", $_key));
+			$task = collection::search($arangodb->session, sprintf("FOR d IN task FILTER d._key == '%s' && d.published == true && d.completed != true && worker == null RETURN d", $_key));
 
 			if ($worker ??= worker($account->getId())) {
 				// Найден сотрудник

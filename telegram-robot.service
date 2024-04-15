@@ -1,6 +1,9 @@
 [Unit]
 Description=Telegram-robot
 
+Wants=network.target
+After=syslog.target network-online.target
+
 [Service]
 ExecStart=sudo -u www-data /usr/bin/php /var/www/spetsresurs-telegram-registry-requests/mirzaev/spetsresurs/telegram/registry/requests/system/public/robot.php
 PIDFile=/var/run/php/telegram-robot.pid
@@ -8,3 +11,6 @@ RemainAfterExit=no
 RuntimeMaxSec=3600s
 Restart=always
 RestartSec=5s
+
+[Install]    
+WantedBy=multi-user.target
