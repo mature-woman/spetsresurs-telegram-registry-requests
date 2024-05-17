@@ -348,35 +348,41 @@ function request_confirmed(Context $ctx): void
 			// Инициализация инстанции task в базе данных (выбранного задания)
 			$task = collection::search($arangodb->session, sprintf("FOR d IN task FILTER d._key == '%s' && d.published == true && d.completed != true && worker == null RETURN d", $_key));
 
-			if ($worker ??= worker($account->getId())) {
-				// Найден сотрудник
+			if ($task instanceof _document) {
+				// Найдена заявка (подразумевается, что не занята)
 
-				// Запись идентификатора нового сотрудника
-				$task->worker = $worker->id;
+				if ($worker ??= worker($account->getId())) {
+					// Найден сотрудник
 
-				// Снятие с публикации
-				$task->published = false;
+					// Запись идентификатора нового сотрудника
+					$task->worker = $worker->id;
 
-				if (document::update($arangodb->session, $task)) {
-					// Записано обновление в базу данных
+					// Снятие с публикации
+					$task->published = false;
 
-					$ctx->getChatDataItem("request_all")->then(function ($requests = []) use ($ctx) {
-						// Удаление сообщений связанных с запросом
-						foreach ($requests ?? [] as $_message) $ctx->deleteMessage($_message->getChat()->getId(), $_message->getMessageId());
-					});
-					$ctx->setChatDataItem("request_all", []);
+					if (document::update($arangodb->session, $task)) {
+						// Записано обновление в базу данных
 
-					$ctx->getChatDataItem("request_confirmation")->then(function ($message) use ($ctx) {
-						$ctx->deleteMessage($message->getChat()->getId(), $message->getMessageId());
-					});
-					$ctx->setChatDataItem("request_confirmation_target", null);
+						$ctx->getChatDataItem("request_all")->then(function ($requests = []) use ($ctx) {
+							// Удаление сообщений связанных с запросом
+							foreach ($requests ?? [] as $_message) $ctx->deleteMessage($_message->getChat()->getId(), $_message->getMessageId());
+						});
+						$ctx->setChatDataItem("request_all", []);
 
-					$ctx->sendMessage("✅ *Вы зарегистрировались на заявку:* \#$_key", ['reply_markup' =>	['remove_keyboard' => true]])->then(function () use ($ctx) {
+						$ctx->getChatDataItem("request_confirmation")->then(function ($message) use ($ctx) {
+							$ctx->deleteMessage($message->getChat()->getId(), $message->getMessageId());
+						});
+						$ctx->setChatDataItem("request_confirmation_target", null);
+
+						$ctx->sendMessage("✅ *Вы зарегистрировались на заявку:* \#$_key", ['reply_markup' =>	['remove_keyboard' => true]])->then(function () use ($ctx) {
+							generateMenu($ctx);
+						});
+
+						// End of the process
+						$ctx->endConversation();
+					} else $ctx->sendMessage("❎ *Не удалось принять заявку:* \#$_key", ['reply_markup' =>	['remove_keyboard' => true]])->then(function () use ($ctx) {
 						generateMenu($ctx);
 					});
-
-					// End of the process
-					$ctx->endConversation();
 				} else $ctx->sendMessage("❎ *Не удалось принять заявку:* \#$_key", ['reply_markup' =>	['remove_keyboard' => true]])->then(function () use ($ctx) {
 					generateMenu($ctx);
 				});
