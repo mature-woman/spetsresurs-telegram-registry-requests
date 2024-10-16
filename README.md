@@ -1,3 +1,5 @@
-# Telegram-robot for registering for tasks
+# Telegram-robot for task registering
 
-Synchronizes accounts with the site, displays a list of published applications with a selection by date, and also register to tasks
+Chat-robot Telegram for accepting applications for employees from [mirzaev/ebala](https://git.mirzaev.sexy/mirzaev/ebala)
+
+**DEVELOPMENT COMPLETED. PROJECT CLOSED.**
